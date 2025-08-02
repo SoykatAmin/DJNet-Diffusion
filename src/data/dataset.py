@@ -18,8 +18,20 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not batch:
         return {}
     
-    # Get the maximum dimensions for padding
-    max_time = max(item['preceding_spectrogram'].shape[-1] for item in batch)
+    # Debug: Print that custom collate is being used
+    # print(f"Custom collate function called with batch size: {len(batch)}")
+    
+    # Get all spectrograms and find the maximum time dimension
+    all_specs = []
+    for item in batch:
+        all_specs.extend([
+            item['preceding_spectrogram'],
+            item['following_spectrogram'], 
+            item['target_transition_spectrogram']
+        ])
+    
+    max_time = max(spec.shape[-1] for spec in all_specs)
+    # print(f"Max time dimension: {max_time}")
     
     # Initialize lists for each field
     collated = {
@@ -36,24 +48,34 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         # Pad spectrograms to max time dimension
         for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
             spec = item[spec_key]
-            if spec.shape[-1] < max_time:
+            current_time = spec.shape[-1]
+            
+            if current_time < max_time:
                 # Pad the time dimension (last dimension)
-                padding = max_time - spec.shape[-1]
+                padding = max_time - current_time
                 spec = F.pad(spec, (0, padding), mode='constant', value=0)
-            elif spec.shape[-1] > max_time:
+            elif current_time > max_time:
                 # Trim if larger than max
                 spec = spec[..., :max_time]
+            
+            # Ensure tensor is detached and contiguous
+            spec = spec.detach().contiguous()
             collated[spec_key].append(spec)
         
         # Add other fields as-is
         collated['transition_type'].append(item['transition_type'])
-        collated['transition_length'].append(item['transition_length'])
-        collated['avg_tempo'].append(item['avg_tempo'])
+        collated['transition_length'].append(float(item['transition_length']))
+        collated['avg_tempo'].append(float(item['avg_tempo']))
         collated['transition_id'].append(item['transition_id'])
     
     # Stack tensors
-    for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
-        collated[spec_key] = torch.stack(collated[spec_key])
+    try:
+        for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
+            collated[spec_key] = torch.stack(collated[spec_key], dim=0)
+    except RuntimeError as e:
+        print(f"Error stacking tensors: {e}")
+        print(f"Tensor shapes: {[t.shape for t in collated[spec_key]]}")
+        raise
     
     # Convert scalar lists to tensors
     collated['transition_length'] = torch.tensor(collated['transition_length'], dtype=torch.float32)
@@ -294,12 +316,12 @@ class DJNetTransitionDataset(Dataset):
                 transition_spec = transition_spec.unsqueeze(0)
             
             sample = {
-                'preceding_spectrogram': preceding_spec,
-                'following_spectrogram': following_spec,
-                'target_transition_spectrogram': transition_spec,
+                'preceding_spectrogram': preceding_spec.float(),
+                'following_spectrogram': following_spec.float(),
+                'target_transition_spectrogram': transition_spec.float(),
                 'transition_type': transition_type,
-                'transition_length': torch.tensor(transition_length, dtype=torch.float32),
-                'avg_tempo': torch.tensor(avg_tempo, dtype=torch.float32),
+                'transition_length': float(transition_length),
+                'avg_tempo': float(avg_tempo),
                 'transition_id': transition_id
             }
             
@@ -339,12 +361,12 @@ def create_dataloaders(config: Dict[str, Any]) -> Tuple[torch.utils.data.DataLoa
         split='test'
     )
     
-    # Create dataloaders
+    # Create dataloaders with num_workers=0 to avoid multiprocessing issues
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=config['data']['shuffle'],
-        num_workers=config['data']['num_workers'],
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues
         pin_memory=config['data']['pin_memory'],
         drop_last=True,
         collate_fn=custom_collate_fn
@@ -354,7 +376,7 @@ def create_dataloaders(config: Dict[str, Any]) -> Tuple[torch.utils.data.DataLoa
         val_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=False,
-        num_workers=config['data']['num_workers'],
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues
         pin_memory=config['data']['pin_memory'],
         drop_last=False,
         collate_fn=custom_collate_fn
@@ -364,7 +386,7 @@ def create_dataloaders(config: Dict[str, Any]) -> Tuple[torch.utils.data.DataLoa
         test_dataset,
         batch_size=config['training']['batch_size'],
         shuffle=False,
-        num_workers=config['data']['num_workers'],
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues
         pin_memory=config['data']['pin_memory'],
         drop_last=False,
         collate_fn=custom_collate_fn
