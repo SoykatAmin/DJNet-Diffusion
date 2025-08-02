@@ -37,17 +37,11 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     
     # Check if all spectrograms have the same shape
     first_item = batch[0]
-    expected_prec_shape = first_item['preceding_spectrogram'].shape
-    expected_foll_shape = first_item['following_spectrogram'].shape  
-    expected_trans_shape = first_item['target_transition_spectrogram'].shape
+    expected_shape = first_item['preceding_spectrogram'].shape  # All should have same shape now
     
     for item in batch:
-        # Verify shapes match expected dimensions
-        for spec_key, expected_shape in [
-            ('preceding_spectrogram', expected_prec_shape),
-            ('following_spectrogram', expected_foll_shape),
-            ('target_transition_spectrogram', expected_trans_shape)
-        ]:
+        # Verify ALL spectrograms have the same shape since they should all be context_frames
+        for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
             spec = item[spec_key]
             
             if spec.shape != expected_shape:
@@ -300,14 +294,14 @@ class DJNetTransitionDataset(Dataset):
             transition_spec = self.spec_processor.audio_to_spectrogram(transition_audio)
             following_spec = self.spec_processor.audio_to_spectrogram(following_audio)
             
-            # Calculate expected spectrogram size for fixed duration
-            expected_frames = int(fixed_duration * self.spec_processor.sample_rate / self.spec_processor.hop_length) + 1
+            # Calculate expected spectrogram size based on context duration
+            # ALL spectrograms should have the same time dimension for concatenation
             context_frames = int(self.context_duration * self.spec_processor.sample_rate / self.spec_processor.hop_length) + 1
             
-            # Force all spectrograms to have exact expected dimensions
+            # Force ALL spectrograms to have the same time dimension (context_frames)
             preceding_spec = self._pad_or_crop_spectrogram(preceding_spec, context_frames)
             following_spec = self._pad_or_crop_spectrogram(following_spec, context_frames)
-            transition_spec = self._pad_or_crop_spectrogram(transition_spec, expected_frames)
+            transition_spec = self._pad_or_crop_spectrogram(transition_spec, context_frames)
             
             # Add channel dimension if needed
             if preceding_spec.dim() == 2:

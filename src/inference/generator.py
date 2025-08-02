@@ -44,6 +44,21 @@ class DJNetGenerator:
         print(f"Loaded DJNet model from {checkpoint_path}")
         print(f"Model trained for {checkpoint['epoch']} epochs")
     
+    def _pad_or_crop_spectrogram(self, spec: torch.Tensor, target_frames: int) -> torch.Tensor:
+        """Pad or crop spectrogram to target number of frames."""
+        current_frames = spec.shape[-1]
+        
+        if current_frames > target_frames:
+            # Crop from center
+            start_idx = (current_frames - target_frames) // 2
+            spec = spec[..., start_idx:start_idx + target_frames]
+        elif current_frames < target_frames:
+            # Pad with zeros
+            padding = target_frames - current_frames
+            spec = torch.nn.functional.pad(spec, (0, padding))
+        
+        return spec
+    
     def prepare_context(
         self,
         song_a_path: str,
@@ -101,6 +116,14 @@ class DJNetGenerator:
         preceding_spec = self.spec_processor.audio_to_spectrogram(preceding_audio.squeeze(0))
         following_spec = self.spec_processor.audio_to_spectrogram(following_audio.squeeze(0))
         
+        # Calculate consistent frame size based on context_duration (same as training)
+        context_frames = int(self.config['audio']['context_duration'] * self.config['audio']['sample_rate'] / 
+                           self.config['audio']['hop_length']) + 1
+        
+        # Ensure both spectrograms have the same time dimension as used in training
+        preceding_spec = self._pad_or_crop_spectrogram(preceding_spec, context_frames)
+        following_spec = self._pad_or_crop_spectrogram(following_spec, context_frames)
+        
         # Add batch and channel dimensions
         preceding_spec = preceding_spec.unsqueeze(0).unsqueeze(0)  # (1, 1, mels, time)
         following_spec = following_spec.unsqueeze(0).unsqueeze(0)  # (1, 1, mels, time)
@@ -134,12 +157,11 @@ class DJNetGenerator:
         length_tensor = torch.tensor([transition_length], dtype=torch.float32, device=self.device)
         transition_types = [transition_type]
         
-        # Initialize with random noise
-        max_transition_duration = self.config['audio']['max_transition_duration']
-        transition_frames = int(max_transition_duration * self.config['audio']['sample_rate'] / 
-                               self.config['audio']['hop_length']) + 1
+        # Initialize with random noise - use same frame size as context (consistent with training)
+        context_frames = int(self.config['audio']['context_duration'] * self.config['audio']['sample_rate'] / 
+                           self.config['audio']['hop_length']) + 1
         
-        noise_shape = (1, 1, self.config['audio']['n_mels'], transition_frames)
+        noise_shape = (1, 1, self.config['audio']['n_mels'], context_frames)
         generated_transition = torch.randn(noise_shape, device=self.device)
         
         # Set up scheduler for inference
