@@ -1,0 +1,43 @@
+model:
+  name: "DJNetDiffusion"
+  in_channels: 3  # preceding_spec + following_spec + transition_spec
+  out_channels: 1  # transition_spec only
+  down_block_types:
+    - "DownBlock2D"
+    - "DownBlock2D"
+  up_block_types:
+    - "UpBlock2D"
+    - "UpBlock2D"
+  block_out_channels: [64, 128]  # Smaller model for CPU testing
+  layers_per_block: 1  # Fewer layers
+  attention_head_dim: 4  # Smaller attention
+  norm_num_groups: 16  # Smaller groups
+  cross_attention_dim: 128  # Smaller conditioning
+
+scheduler:
+  num_train_timesteps: 100  # Fewer timesteps for faster testing
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: "linear"
+  variance_type: "fixed_small"
+  clip_sample: false
+
+audio:
+  sample_rate: 22050
+  n_mels: 64  # Smaller spectrograms for CPU
+  n_fft: 1024  # Smaller FFT
+  hop_length: 256
+  win_length: 1024
+  context_duration: 2.0  # Shorter context for testing
+  max_transition_duration: 4.0  # Shorter transitions for testing
+  normalize_spectrograms: true
+  spec_min: -80.0  # dB
+  spec_max: 0.0    # dB
+
+conditioning:
+  use_tempo: true
+  use_transition_type: true
+  use_transition_length: true
+  tempo_embed_dim: 32  # Smaller embeddings
+  type_embed_dim: 32
+  length_embed_dim: 32

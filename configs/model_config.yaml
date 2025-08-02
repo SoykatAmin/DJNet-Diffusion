@@ -1,0 +1,47 @@
+model:
+  name: "DJNetDiffusion"
+  in_channels: 3  # preceding_spec + following_spec + transition_spec
+  out_channels: 1  # transition_spec only
+  down_block_types:
+    - "DownBlock2D"
+    - "DownBlock2D"
+    - "DownBlock2D"
+    - "AttnDownBlock2D"
+  up_block_types:
+    - "AttnUpBlock2D"
+    - "UpBlock2D"
+    - "UpBlock2D"
+    - "UpBlock2D"
+  block_out_channels: [128, 256, 512, 512]
+  layers_per_block: 2
+  attention_head_dim: 8
+  norm_num_groups: 32
+  cross_attention_dim: 256  # For conditioning embeddings
+
+scheduler:
+  num_train_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: "linear"
+  variance_type: "fixed_small"
+  clip_sample: false
+
+audio:
+  sample_rate: 22050
+  n_mels: 128
+  n_fft: 2048
+  hop_length: 512
+  win_length: 2048
+  context_duration: 4.0  # seconds of context before/after transition
+  max_transition_duration: 8.0  # max transition length in seconds
+  normalize_spectrograms: true
+  spec_min: -80.0  # dB
+  spec_max: 0.0    # dB
+
+conditioning:
+  use_tempo: true
+  use_transition_type: true
+  use_transition_length: true
+  tempo_embed_dim: 64
+  type_embed_dim: 64
+  length_embed_dim: 64

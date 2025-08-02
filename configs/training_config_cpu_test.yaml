@@ -1,0 +1,37 @@
+training:
+  batch_size: 2  # Small batch size for CPU testing
+  num_epochs: 2  # Just for testing
+  learning_rate: 1e-4
+  weight_decay: 1e-6
+  warmup_steps: 10
+  gradient_clip_norm: 1.0
+  save_every_n_epochs: 1
+  validate_every_n_epochs: 1
+  
+data:
+  metadata_path: "/media/soykat/Data/Università/Computer Science/Deep Learning and Applied AI/project/DJNet-Diffusion/metadata.csv"
+  data_root: "/media/soykat/Data/Università/Computer Science/Deep Learning and Applied AI/project/DJNet-Dataset/output/djnet_dataset_20k"
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  num_workers: 0  # No multiprocessing for CPU testing
+  pin_memory: false  # Disable for CPU
+  shuffle: true
+
+logging:
+  log_dir: "logs"
+  use_wandb: false
+  wandb_project: "djnet-diffusion-test"
+  log_every_n_steps: 5  # More frequent logging for testing
+  save_audio_samples: false  # Disable to speed up testing
+  num_audio_samples: 1
+
+optimization:
+  optimizer: "AdamW"
+  scheduler: "cosine"
+  min_lr: 1e-6
+
+checkpointing:
+  checkpoint_dir: "checkpoints"
+  resume_from_checkpoint: null
+  save_best_only: false
