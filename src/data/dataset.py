@@ -21,17 +21,8 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Debug: Print that custom collate is being used
     # print(f"Custom collate function called with batch size: {len(batch)}")
     
-    # Get all spectrograms and find the maximum time dimension
-    all_specs = []
-    for item in batch:
-        all_specs.extend([
-            item['preceding_spectrogram'],
-            item['following_spectrogram'], 
-            item['target_transition_spectrogram']
-        ])
-    
-    max_time = max(spec.shape[-1] for spec in all_specs)
-    # print(f"Max time dimension: {max_time}")
+    # Instead of finding max, use fixed expected dimensions
+    # This should be consistent since we now force fixed dimensions in the dataset
     
     # Initialize lists for each field
     collated = {
@@ -44,19 +35,30 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         'transition_id': []
     }
     
+    # Check if all spectrograms have the same shape
+    first_item = batch[0]
+    expected_prec_shape = first_item['preceding_spectrogram'].shape
+    expected_foll_shape = first_item['following_spectrogram'].shape  
+    expected_trans_shape = first_item['target_transition_spectrogram'].shape
+    
     for item in batch:
-        # Pad spectrograms to max time dimension
-        for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
+        # Verify shapes match expected dimensions
+        for spec_key, expected_shape in [
+            ('preceding_spectrogram', expected_prec_shape),
+            ('following_spectrogram', expected_foll_shape),
+            ('target_transition_spectrogram', expected_trans_shape)
+        ]:
             spec = item[spec_key]
-            current_time = spec.shape[-1]
             
-            if current_time < max_time:
-                # Pad the time dimension (last dimension)
-                padding = max_time - current_time
-                spec = F.pad(spec, (0, padding), mode='constant', value=0)
-            elif current_time > max_time:
-                # Trim if larger than max
-                spec = spec[..., :max_time]
+            if spec.shape != expected_shape:
+                print(f"Warning: {spec_key} shape mismatch. Expected {expected_shape}, got {spec.shape}")
+                # Force reshape to expected dimensions
+                if spec.shape[-1] != expected_shape[-1]:
+                    if spec.shape[-1] < expected_shape[-1]:
+                        padding = expected_shape[-1] - spec.shape[-1]
+                        spec = F.pad(spec, (0, padding), mode='constant', value=0)
+                    else:
+                        spec = spec[..., :expected_shape[-1]]
             
             # Ensure tensor is detached and contiguous
             spec = spec.detach().contiguous()
@@ -73,7 +75,7 @@ def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
             collated[spec_key] = torch.stack(collated[spec_key], dim=0)
     except RuntimeError as e:
-        print(f"Error stacking tensors: {e}")
+        print(f"Error stacking tensors for {spec_key}: {e}")
         print(f"Tensor shapes: {[t.shape for t in collated[spec_key]]}")
         raise
     
@@ -248,10 +250,11 @@ class DJNetTransitionDataset(Dataset):
                 str(transition_path / 'source_b.wav')
             )
             
-            # Load target transition
+            # Load target transition with fixed duration to ensure consistent spectrograms
+            fixed_duration = min(transition_length, self.max_transition_duration)
             transition_audio = self.spec_processor.load_audio(
                 str(transition_path / 'target.wav'),
-                duration=min(transition_length, self.max_transition_duration)
+                duration=fixed_duration
             )
             
             # Extract context segments around transition points
@@ -259,53 +262,52 @@ class DJNetTransitionDataset(Dataset):
             start_pos_a = conditioning.get('start_position_a_sec', len(source_a_audio) / self.spec_processor.sample_rate - self.context_duration)
             start_pos_b = conditioning.get('start_position_b_sec', 0.0)
             
-            # Extract preceding context (before transition in source A)
+            # Extract preceding context (before transition in source A) with fixed duration
+            context_samples = int(self.context_duration * self.spec_processor.sample_rate)
             start_sample_a = max(0, int((start_pos_a - self.context_duration) * self.spec_processor.sample_rate))
-            end_sample_a = int(start_pos_a * self.spec_processor.sample_rate)
+            end_sample_a = start_sample_a + context_samples
             
-            if end_sample_a > start_sample_a and end_sample_a <= len(source_a_audio):
+            if end_sample_a <= len(source_a_audio):
                 preceding_audio = source_a_audio[start_sample_a:end_sample_a]
             else:
                 # Fallback: take last context_duration seconds
-                context_samples = int(self.context_duration * self.spec_processor.sample_rate)
                 preceding_audio = source_a_audio[-context_samples:] if len(source_a_audio) >= context_samples else source_a_audio
+                # Pad if too short
+                if len(preceding_audio) < context_samples:
+                    padding = context_samples - len(preceding_audio)
+                    preceding_audio = torch.nn.functional.pad(preceding_audio, (padding, 0))
             
-            # Extract following context (after transition start in source B)
+            # Extract following context (after transition start in source B) with fixed duration
             start_sample_b = int(start_pos_b * self.spec_processor.sample_rate)
-            end_sample_b = start_sample_b + int(self.context_duration * self.spec_processor.sample_rate)
+            end_sample_b = start_sample_b + context_samples
             
-            if start_sample_b < len(source_b_audio) and end_sample_b <= len(source_b_audio):
+            if end_sample_b <= len(source_b_audio):
                 following_audio = source_b_audio[start_sample_b:end_sample_b]
             else:
                 # Fallback: take first context_duration seconds
-                context_samples = int(self.context_duration * self.spec_processor.sample_rate)
                 following_audio = source_b_audio[:context_samples] if len(source_b_audio) >= context_samples else source_b_audio
+                # Pad if too short
+                if len(following_audio) < context_samples:
+                    padding = context_samples - len(following_audio)
+                    following_audio = torch.nn.functional.pad(following_audio, (0, padding))
             
-            # Ensure context segments have correct duration
-            context_samples = int(self.context_duration * self.spec_processor.sample_rate)
-            if len(preceding_audio) < context_samples:
-                padding = context_samples - len(preceding_audio)
-                preceding_audio = torch.nn.functional.pad(preceding_audio, (padding, 0))
-            elif len(preceding_audio) > context_samples:
-                preceding_audio = preceding_audio[-context_samples:]
-            
-            if len(following_audio) < context_samples:
-                padding = context_samples - len(following_audio)
-                following_audio = torch.nn.functional.pad(following_audio, (0, padding))
-            elif len(following_audio) > context_samples:
-                following_audio = following_audio[:context_samples]
+            # Ensure all audio segments have exactly the same length
+            preceding_audio = preceding_audio[:context_samples] if len(preceding_audio) > context_samples else preceding_audio
+            following_audio = following_audio[:context_samples] if len(following_audio) > context_samples else following_audio
             
             # Convert to spectrograms
             preceding_spec = self.spec_processor.audio_to_spectrogram(preceding_audio)
             transition_spec = self.spec_processor.audio_to_spectrogram(transition_audio)
             following_spec = self.spec_processor.audio_to_spectrogram(following_audio)
             
-            # Ensure consistent sizes - all spectrograms should have same time dimension
-            # Use transition spectrogram size as reference since it's the target
-            target_frames = transition_spec.shape[-1]
+            # Calculate expected spectrogram size for fixed duration
+            expected_frames = int(fixed_duration * self.spec_processor.sample_rate / self.spec_processor.hop_length) + 1
+            context_frames = int(self.context_duration * self.spec_processor.sample_rate / self.spec_processor.hop_length) + 1
             
-            preceding_spec = self._pad_or_crop_spectrogram(preceding_spec, target_frames)
-            following_spec = self._pad_or_crop_spectrogram(following_spec, target_frames)
+            # Force all spectrograms to have exact expected dimensions
+            preceding_spec = self._pad_or_crop_spectrogram(preceding_spec, context_frames)
+            following_spec = self._pad_or_crop_spectrogram(following_spec, context_frames)
+            transition_spec = self._pad_or_crop_spectrogram(transition_spec, expected_frames)
             
             # Add channel dimension if needed
             if preceding_spec.dim() == 2:
