@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torchaudio
 import librosa
 import numpy as np
@@ -6,10 +7,59 @@ from torch.utils.data import Dataset
 import pandas as pd
 import os
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, List
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+def custom_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Custom collate function to handle tensors of different sizes."""
+    if not batch:
+        return {}
+    
+    # Get the maximum dimensions for padding
+    max_time = max(item['preceding_spectrogram'].shape[-1] for item in batch)
+    
+    # Initialize lists for each field
+    collated = {
+        'preceding_spectrogram': [],
+        'following_spectrogram': [],
+        'target_transition_spectrogram': [],
+        'transition_type': [],
+        'transition_length': [],
+        'avg_tempo': [],
+        'transition_id': []
+    }
+    
+    for item in batch:
+        # Pad spectrograms to max time dimension
+        for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
+            spec = item[spec_key]
+            if spec.shape[-1] < max_time:
+                # Pad the time dimension (last dimension)
+                padding = max_time - spec.shape[-1]
+                spec = F.pad(spec, (0, padding), mode='constant', value=0)
+            elif spec.shape[-1] > max_time:
+                # Trim if larger than max
+                spec = spec[..., :max_time]
+            collated[spec_key].append(spec)
+        
+        # Add other fields as-is
+        collated['transition_type'].append(item['transition_type'])
+        collated['transition_length'].append(item['transition_length'])
+        collated['avg_tempo'].append(item['avg_tempo'])
+        collated['transition_id'].append(item['transition_id'])
+    
+    # Stack tensors
+    for spec_key in ['preceding_spectrogram', 'following_spectrogram', 'target_transition_spectrogram']:
+        collated[spec_key] = torch.stack(collated[spec_key])
+    
+    # Convert scalar lists to tensors
+    collated['transition_length'] = torch.tensor(collated['transition_length'], dtype=torch.float32)
+    collated['avg_tempo'] = torch.tensor(collated['avg_tempo'], dtype=torch.float32)
+    
+    return collated
 
 
 class SpectrogramProcessor:
@@ -296,7 +346,8 @@ def create_dataloaders(config: Dict[str, Any]) -> Tuple[torch.utils.data.DataLoa
         shuffle=config['data']['shuffle'],
         num_workers=config['data']['num_workers'],
         pin_memory=config['data']['pin_memory'],
-        drop_last=True
+        drop_last=True,
+        collate_fn=custom_collate_fn
     )
     
     val_loader = torch.utils.data.DataLoader(
@@ -305,7 +356,8 @@ def create_dataloaders(config: Dict[str, Any]) -> Tuple[torch.utils.data.DataLoa
         shuffle=False,
         num_workers=config['data']['num_workers'],
         pin_memory=config['data']['pin_memory'],
-        drop_last=False
+        drop_last=False,
+        collate_fn=custom_collate_fn
     )
     
     test_loader = torch.utils.data.DataLoader(
@@ -314,7 +366,8 @@ def create_dataloaders(config: Dict[str, Any]) -> Tuple[torch.utils.data.DataLoa
         shuffle=False,
         num_workers=config['data']['num_workers'],
         pin_memory=config['data']['pin_memory'],
-        drop_last=False
+        drop_last=False,
+        collate_fn=custom_collate_fn
     )
     
     return train_loader, val_loader, test_loader
