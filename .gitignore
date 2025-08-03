@@ -42,6 +42,12 @@ ENV/
 *.aac
 metadata.csv
 dataset/
+data/
+
+# Generated outputs
+debug_generated_transition.wav
+test_generated_transition.wav
+debug_spectrogram.png
 
 # Jupyter Notebook
 .ipynb_checkpoints
