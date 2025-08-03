@@ -240,8 +240,8 @@ class DJNetGenerator:
             seed=seed
         )
         
-        # Convert to audio
-        transition_audio = spectrogram_to_audio(transition_spec, self.config)
+        # Convert to audio using mel-to-linear conversion
+        transition_audio = spectrogram_to_audio(transition_spec, self.config, method='mel_to_linear')
         
         # Trim to desired length
         target_samples = int(transition_length * self.config['audio']['sample_rate'])
