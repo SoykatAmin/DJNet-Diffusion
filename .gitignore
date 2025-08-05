@@ -73,3 +73,17 @@ IMPLEMENTATION_GUIDE.md
 tensorboard_logs/
 wandb/
 *.log
+
+# Generated audio outputs
+*_generated_*.wav
+*_amplified_*.wav
+*_proper_*.wav
+*_debug_*.wav
+*_test_*.wav
+
+# Training summary files
+training_fixes_summary.py
+
+# Debug outputs
+debug_*.png
+debug_*.wav
