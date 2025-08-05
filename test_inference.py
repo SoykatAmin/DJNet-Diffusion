@@ -31,7 +31,7 @@ def test_inference():
         return False
     
     # Check if checkpoint exists
-    checkpoint_path = 'checkpoints/best_checkpoint.pth'
+    checkpoint_path = 'checkpoints/best_checkpoint2.pth'
     if not os.path.exists(checkpoint_path):
         print(f"✗ Checkpoint not found: {checkpoint_path}")
         return False
@@ -115,9 +115,10 @@ def test_inference():
             song_a_path=str(song_a_path),
             song_b_path=str(song_b_path),
             output_path=output_path,
-            transition_length=2.0,  # 2 second transition
+            transition_length=4.0,  # 2 second transition
             tempo=120.0,
-            transition_type='linear_fade',
+            transition_type='linear_fade',  # Use a simple type for testing
+            # transition_type='linear_fade',  # or 'bass_swap_eq', 'filter_sweep', etc.
             num_inference_steps=20,  # Reduced for faster CPU inference
             guidance_scale=7.5,
             seed=42,

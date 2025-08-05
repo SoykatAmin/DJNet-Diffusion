@@ -27,7 +27,10 @@ def spectrogram_to_audio(
         spectrogram = (spectrogram + 1.0) / 2.0 * (spec_max - spec_min) + spec_min
     
     # Convert from dB back to magnitude
-    spectrogram_magnitude = torch.pow(10.0, spectrogram / 10.0)
+    # Use proper dB to amplitude conversion: magnitude = 10^(dB/20)
+    # Clamp dB values to prevent overflow
+    clamped_db = torch.clamp(spectrogram, min=-100, max=20)
+    spectrogram_magnitude = torch.pow(10.0, clamped_db / 20.0)
     
     if method == 'griffin_lim':
         # Use Griffin-Lim algorithm for reconstruction
@@ -66,21 +69,74 @@ def spectrogram_to_audio(
     return audio
 
 
+def mel_to_linear(mel_spec: torch.Tensor, sr: int = 22050, n_fft: int = 1024, n_mels: int = 128) -> torch.Tensor:
+    """Convert mel spectrogram to linear spectrogram."""
+    mel_to_linear_transform = torchaudio.transforms.InverseMelScale(
+        n_stft=n_fft // 2 + 1,
+        n_mels=n_mels,
+        sample_rate=sr,
+        f_min=0,
+        f_max=sr // 2,
+        mel_scale="htk"
+    )
+    return mel_to_linear_transform(mel_spec)
+
+
+def mel_to_audio(mel_spec: torch.Tensor, sr: int = 22050, n_fft: int = 1024, 
+                hop_length: int = 256, n_iter: int = 32) -> torch.Tensor:
+    """Convert mel spectrogram directly to audio."""
+    
+    # Remove extra dimensions
+    if mel_spec.dim() > 2:
+        mel_spec = mel_spec.squeeze()
+    
+    # Convert mel to linear
+    linear_spec = mel_to_linear(mel_spec, sr=sr, n_fft=n_fft)
+    
+    # Apply Griffin-Lim
+    griffin_lim = torchaudio.transforms.GriffinLim(
+        n_fft=n_fft,
+        win_length=n_fft,
+        hop_length=hop_length,
+        power=2.0,
+        n_iter=n_iter,
+        momentum=0.99,
+        rand_init=True
+    )
+    
+    audio = griffin_lim(linear_spec)
+    return audio
+
+
 def save_audio(audio: torch.Tensor, filepath: str, sample_rate: int):
-    """Save audio tensor to file."""
+    """Save audio tensor to file with proper handling."""
     # Convert to numpy
     if isinstance(audio, torch.Tensor):
         audio_np = audio.detach().cpu().numpy()
     else:
         audio_np = audio
     
-    # Ensure audio is 1D
-    if audio_np.ndim > 1:
+    # Ensure audio is 1D or 2D
+    if audio_np.ndim > 2:
         audio_np = audio_np.squeeze()
     
-    # Normalize to [-1, 1] if needed
-    if audio_np.max() > 1.0 or audio_np.min() < -1.0:
-        audio_np = audio_np / max(abs(audio_np.max()), abs(audio_np.min()))
+    # Handle 2D case (stereo or batch)
+    if audio_np.ndim == 2:
+        if audio_np.shape[0] == 1:  # Single channel
+            audio_np = audio_np.squeeze(0)
+        elif audio_np.shape[1] == 1:  # Single channel, transposed
+            audio_np = audio_np.squeeze(1)
+    
+    # Check for NaN or Inf
+    if np.isnan(audio_np).any() or np.isinf(audio_np).any():
+        print(f"Warning: Audio contains NaN or Inf values, replacing with zeros")
+        audio_np = np.nan_to_num(audio_np, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Gentle normalization - only if audio is very loud
+    max_val = np.max(np.abs(audio_np))
+    if max_val > 1.0:
+        # Soft compression instead of hard clipping
+        audio_np = audio_np / (max_val * 1.1)  # Slight headroom
     
     # Save using soundfile
     sf.write(filepath, audio_np, sample_rate)

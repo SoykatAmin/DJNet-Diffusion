@@ -205,13 +205,16 @@ class DJNetTrainer:
             
             # Denoising loop
             for t in tqdm(self.scheduler.timesteps, desc="Generating"):
+                # Ensure timestep is on correct device
+                timestep = t.unsqueeze(0).to(self.device)
+                
                 # Prepare input
                 model_input = torch.cat([preceding_spec, following_spec, generated_transition], dim=1)
                 
                 # Predict noise
                 noise_pred = self.model(
                     sample=model_input,
-                    timestep=t.unsqueeze(0),
+                    timestep=timestep,
                     tempo=tempo,
                     transition_types=transition_types,
                     transition_lengths=transition_length,
@@ -226,43 +229,149 @@ class DJNetTrainer:
             return generated_transition
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
-        """Save model checkpoint."""
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.lr_scheduler.state_dict() if self.lr_scheduler else None,
-            'best_val_loss': self.best_val_loss,
-            'config': self.config
-        }
-        
-        # Save regular checkpoint
-        checkpoint_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pth'
-        torch.save(checkpoint, checkpoint_path)
-        
-        # Save best checkpoint
-        if is_best:
-            best_path = self.checkpoint_dir / 'best_model.pth'
-            torch.save(checkpoint, best_path)
-        
-        # Save latest checkpoint
-        latest_path = self.checkpoint_dir / 'latest_model.pth'
-        torch.save(checkpoint, latest_path)
+        """Save checkpoint with robust error handling and disk space management."""
+        try:
+            # First, check available disk space (rough estimate)
+            import shutil
+            free_space = shutil.disk_usage(self.checkpoint_dir).free
+            estimated_checkpoint_size = 1.5e9  # ~1.5GB estimate for large models
+            
+            if free_space < estimated_checkpoint_size * 2:  # Need 2x space for safety
+                print(f"⚠️  Low disk space ({free_space / 1e9:.1f}GB free). Cleaning old checkpoints...")
+                self.cleanup_old_checkpoints(keep_last_n=2)
+            
+            # Prepare checkpoint data with CPU tensors to avoid device issues
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': {k: v.cpu() for k, v in self.model.state_dict().items()},
+                'optimizer_state_dict': {k: v.cpu() if isinstance(v, torch.Tensor) else v 
+                                       for k, v in self.optimizer.state_dict().items()},
+                'scheduler_state_dict': self.lr_scheduler.state_dict() if self.lr_scheduler else None,
+                'config': self.config,
+                'best_val_loss': self.best_val_loss,
+            }
+            
+            # Save with temporary file to prevent corruption
+            checkpoint_path = self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pth'
+            temp_path = checkpoint_path.with_suffix('.tmp')
+            
+            # Save to temporary file first
+            torch.save(checkpoint, temp_path)
+            
+            # If successful, rename to final filename
+            temp_path.rename(checkpoint_path)
+            
+            print(f"✓ Saved checkpoint: {checkpoint_path}")
+            
+            # Save best checkpoint
+            if is_best:
+                best_path = self.checkpoint_dir / 'best_model.pth'
+                best_temp_path = best_path.with_suffix('.tmp')
+                
+                torch.save(checkpoint, best_temp_path)
+                best_temp_path.rename(best_path)
+                
+                print(f"✓ Saved best checkpoint: {best_path}")
+            
+            # Save latest checkpoint
+            latest_path = self.checkpoint_dir / 'latest_model.pth'
+            latest_temp_path = latest_path.with_suffix('.tmp')
+            
+            torch.save(checkpoint, latest_temp_path)
+            latest_temp_path.rename(latest_path)
+            
+            # Clean up old checkpoints to save space
+            if epoch > 5:  # Keep some history
+                self.cleanup_old_checkpoints(keep_last_n=3)
+                
+        except Exception as e:
+            print(f"❌ Error saving checkpoint: {str(e)}")
+            # Try to clean up any temporary files
+            try:
+                if 'temp_path' in locals() and temp_path.exists():
+                    temp_path.unlink()
+                if 'best_temp_path' in locals() and best_temp_path.exists():
+                    best_temp_path.unlink()
+                if 'latest_temp_path' in locals() and latest_temp_path.exists():
+                    latest_temp_path.unlink()
+            except:
+                pass
+            raise e
+    
+    def cleanup_old_checkpoints(self, keep_last_n: int = 3):
+        """Clean up old checkpoints to save disk space."""
+        try:
+            # Get all checkpoint files
+            checkpoint_files = list(self.checkpoint_dir.glob('checkpoint_epoch_*.pth'))
+            
+            # Sort by epoch number
+            checkpoint_files.sort(key=lambda x: int(x.stem.split('_')[-1]))
+            
+            # Remove old checkpoints, keeping the last N
+            files_to_remove = checkpoint_files[:-keep_last_n] if len(checkpoint_files) > keep_last_n else []
+            
+            for file_path in files_to_remove:
+                try:
+                    file_path.unlink()
+                    print(f"Cleaned up old checkpoint: {file_path.name}")
+                except Exception as e:
+                    print(f"Could not remove {file_path}: {e}")
+                    
+        except Exception as e:
+            print(f"Error during checkpoint cleanup: {e}")
     
     def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        """Load model checkpoint with enhanced error handling."""
+        try:
+            print(f"Loading checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            
+            # Load model state
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            print("✓ Loaded model state")
+            
+            # Load optimizer state
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print("✓ Loaded optimizer state")
+            
+            # Load scheduler state if available
+            if self.lr_scheduler and checkpoint.get('scheduler_state_dict'):
+                self.lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                print("✓ Loaded scheduler state")
+            
+            # Load training state
+            self.current_epoch = checkpoint['epoch']
+            self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            
+            print(f"✅ Successfully loaded checkpoint from epoch {self.current_epoch}")
+            print(f"   Best validation loss: {self.best_val_loss:.4f}")
+            
+        except Exception as e:
+            print(f"❌ Error loading checkpoint: {str(e)}")
+            raise e
+    
+    def find_latest_checkpoint(self) -> Optional[str]:
+        """Find the latest checkpoint in the checkpoint directory."""
+        checkpoint_files = list(self.checkpoint_dir.glob('checkpoint_epoch_*.pth'))
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if not checkpoint_files:
+            return None
         
-        if self.lr_scheduler and checkpoint['scheduler_state_dict']:
-            self.lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        # Sort by epoch number and get the latest
+        latest_checkpoint = max(checkpoint_files, key=lambda x: int(x.stem.split('_')[-1]))
+        return str(latest_checkpoint)
+    
+    def auto_resume(self) -> bool:
+        """Automatically resume from the latest checkpoint if available."""
+        latest_checkpoint = self.find_latest_checkpoint()
         
-        self.current_epoch = checkpoint['epoch']
-        self.best_val_loss = checkpoint['best_val_loss']
-        
-        print(f"Loaded checkpoint from epoch {self.current_epoch}")
+        if latest_checkpoint:
+            print(f"🔄 Auto-resuming from: {Path(latest_checkpoint).name}")
+            self.load_checkpoint(latest_checkpoint)
+            return True
+        else:
+            print("🆕 No existing checkpoints found. Starting from scratch.")
+            return False
     
     def train(self):
         """Main training loop."""
@@ -334,30 +443,53 @@ class DJNetTrainer:
         print("Training completed!")
     
     def save_sample_audio(self, epoch: int):
-        """Generate and save sample audio for inspection."""
+        """Generate and save sample audio with proper device handling."""
         try:
             # Get a validation batch
             val_batch = next(iter(self.val_loader))
             
             # Generate samples
             for i in range(min(self.config['logging']['num_audio_samples'], len(val_batch['transition_id']))):
-                # Create single sample batch
-                sample_batch = {k: v[i:i+1] if isinstance(v, torch.Tensor) else [v[i]] 
-                               for k, v in val_batch.items()}
+                # Create single sample batch with proper device handling
+                sample_batch = {}
+                for k, v in val_batch.items():
+                    if isinstance(v, torch.Tensor):
+                        # Ensure tensor is on correct device
+                        sample_batch[k] = v[i:i+1].to(self.device)
+                    else:
+                        sample_batch[k] = [v[i]]
                 
                 # Generate transition
                 generated_spec = self.generate_sample(sample_batch)
                 
-                # Convert to audio (you'll need to implement this)
-                # generated_audio = spectrogram_to_audio(generated_spec, self.config)
+                # Move generated spec to CPU for audio conversion
+                generated_spec_cpu = generated_spec.cpu()
+                
+                # Convert to audio
+                from src.utils.audio_utils import spectrogram_to_audio
+                generated_audio = spectrogram_to_audio(generated_spec_cpu, self.config)
                 
                 # Save audio
-                # save_path = self.checkpoint_dir / f'samples/epoch_{epoch}_sample_{i}.wav'
-                # save_path.parent.mkdir(exist_ok=True)
-                # save_audio(generated_audio, save_path, self.config['audio']['sample_rate'])
+                save_path = self.checkpoint_dir / f'samples/epoch_{epoch}_sample_{i}.wav'
+                save_path.parent.mkdir(exist_ok=True, parents=True)
+                
+                # Ensure audio is on CPU for saving
+                if isinstance(generated_audio, torch.Tensor):
+                    generated_audio = generated_audio.cpu()
+                
+                import torchaudio
+                torchaudio.save(
+                    str(save_path), 
+                    generated_audio.unsqueeze(0) if generated_audio.dim() == 1 else generated_audio,
+                    self.config['audio']['sample_rate']
+                )
+                
+                print(f"Saved sample audio: {save_path}")
                 
         except Exception as e:
             print(f"Error saving sample audio: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
